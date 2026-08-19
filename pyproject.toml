@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pinduoduo-ai"
+version = "0.1.0"
+description = "拼多多 AI 自动客服：复用本地 Chrome 在客服网页版自动回复买家消息"
+requires-python = ">=3.10"
+dependencies = [
+    "playwright",
+    "pyyaml",
+    "python-dotenv",
+    "openai",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -1,6 +1,8 @@
 .env
 __pycache__/
 *.pyc
-data/
+# Chrome 运行时配置目录（含登录态，不入库）；知识库等其他 data/ 内容正常跟踪
+data/chrome_profile/
+*.egg-info/
 .pytest_cache/
 .superpowers/

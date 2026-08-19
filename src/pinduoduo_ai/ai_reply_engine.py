@@ -60,7 +60,7 @@ class AIReplyEngine:
                     messages=messages,
                     temperature=0.6,
                 )
-                content = resp["choices"][0]["message"]["content"]
+                content = resp.choices[0].message.content
                 return self._parse(content)
             except Exception:
                 if attempt == 2:

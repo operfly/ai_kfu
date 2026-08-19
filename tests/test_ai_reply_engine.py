@@ -5,7 +5,9 @@ from pinduoduo_ai.ai_reply_engine import AIReplyEngine
 
 
 class FakeClient:
-    """模拟 OpenAI 兼容客户端的 chat.completions.create"""
+    """模拟 OpenAI 兼容客户端的 chat.completions.create。
+    响应使用 SimpleNamespace 链建模真实 ChatCompletion 的属性访问形状，
+    因此 fake 与真实 openai 客户端行为一致。"""
 
     def __init__(self, responses):
         self.responses = responses
@@ -26,6 +28,13 @@ class FakeClient:
         return self.responses.pop(0)
 
 
+def _chat_completion(content):
+    """构造一个属性可访问、形状与 ChatCompletion 一致的响应对象。"""
+    return SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content=content))]
+    )
+
+
 def _make_engine(fake):
     eng = AIReplyEngine(api_key="test-key", base_url="https://x", model="m")
     eng._client = fake
@@ -33,7 +42,7 @@ def _make_engine(fake):
 
 
 def test_reply_action_parses():
-    fake = FakeClient([{"choices": [{"message": {"content": '{"action": "reply", "text": "亲，您好！"}'}}]}])
+    fake = FakeClient([_chat_completion('{"action": "reply", "text": "亲，您好！"}')])
     eng = _make_engine(fake)
     result = eng.generate_reply(["买家: 在吗", "我: 亲在的"])
     assert result["action"] == "reply"
@@ -41,21 +50,21 @@ def test_reply_action_parses():
 
 
 def test_handoff_action_parses():
-    fake = FakeClient([{"choices": [{"message": {"content": '{"action": "handoff", "text": "涉及退款，转人工"}'}}]}])
+    fake = FakeClient([_chat_completion('{"action": "handoff", "text": "涉及退款，转人工"}')])
     eng = _make_engine(fake)
     result = eng.generate_reply(["买家: 我要退款"])
     assert result["action"] == "handoff"
 
 
 def test_non_json_falls_back_unclear():
-    fake = FakeClient([{"choices": [{"message": {"content": "抱歉我无法回答"}}]}])
+    fake = FakeClient([_chat_completion("抱歉我无法回答")])
     eng = _make_engine(fake)
     result = eng.generate_reply(["买家: 你好"])
     assert result["action"] == "unclear"
 
 
 def test_malformed_json_unclear():
-    fake = FakeClient([{"choices": [{"message": {"content": "{broken json"}}]}])
+    fake = FakeClient([_chat_completion("{broken json")])
     eng = _make_engine(fake)
     result = eng.generate_reply(["买家: 你好"])
     assert result["action"] == "unclear"

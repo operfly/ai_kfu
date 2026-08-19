@@ -1,0 +1,20 @@
+# 拼多多 AI 自动客服配置
+browser:
+  cdp_port: 9222          # 本地 Chrome 调试端口
+  url: "https://mms.pinduoduo.com/"
+  # 客服会话页面路径（Task 0 侦察后修正）
+  customer_service_path: ""
+
+polling:
+  interval_seconds: 5     # 轮询间隔
+  conversation_cooldown_seconds: 60   # 每会话回复后冷却
+  global_rate_limit_seconds: 10       # 全局两条回复最小间隔
+  daily_reply_limit: 100              # 每日自动回复上限
+
+ai:
+  model: "deepseek-chat"
+  base_url: "https://api.deepseek.com"
+  max_history_messages: 20   # 传给 AI 的最大历史消息数
+
+human_handoff:
+  mark_text: "【待人工处理】"   # 转人工时在会话中标记的文本

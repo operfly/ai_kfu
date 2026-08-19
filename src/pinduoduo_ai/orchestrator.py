@@ -1,7 +1,7 @@
 # src/pinduoduo_ai/orchestrator.py
 import time
 from .browser_controller import BrowserController
-from .session_manager import SessionManager, ConversationState
+from .session_manager import SessionManager
 from .ai_reply_engine import AIReplyEngine
 from .safety import check_sensitive, default_sensitive_words
 from .config import load_config, get_api_key
@@ -35,7 +35,10 @@ class Orchestrator:
             if not self.sm.can_send(p["global_rate_limit_seconds"]):
                 continue
             self.sm.mark_processing(name)
-            self.browser.open_conversation(page, name)
+            if not self.browser.open_conversation(page, name):
+                # 打开会话失败：记录并跳过该会话，不标记状态，下轮重试
+                actions.append({"session": name, "action": "handoff", "text": "打开会话失败，跳过本轮"})
+                continue
             history = self.browser.read_last_messages(
                 page, self.config["ai"].get("max_history_messages", 20)
             )

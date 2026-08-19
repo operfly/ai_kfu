@@ -1,6 +1,10 @@
 # src/pinduoduo_ai/browser_controller.py
+import logging
+
 from playwright.sync_api import sync_playwright
 from .selectors import SELECTORS
+
+logger = logging.getLogger(__name__)
 
 
 class BrowserController:
@@ -55,7 +59,8 @@ class BrowserController:
             page.locator(SELECTORS["send_button"]).click()
             page.wait_for_timeout(500)
             return True
-        except Exception:
+        except Exception as e:
+            logger.warning("发送消息失败: %s", e)
             return False
 
     def get_conversations(self, page) -> list[dict]:
@@ -65,7 +70,8 @@ class BrowserController:
         for it in items:
             try:
                 name = (it.inner_text() or "").strip().split("\n")[0]
-            except Exception:
+            except Exception as e:
+                logger.warning("读取会话项文本失败: %s", e)
                 continue
             badge = it.locator(SELECTORS["conversation_unread_badge"]).count() > 0 if SELECTORS["conversation_unread_badge"] else False
             result.append({"name": name, "has_unread": badge})
@@ -80,7 +86,8 @@ class BrowserController:
                     page.wait_for_timeout(1500)
                     return True
             return False
-        except Exception:
+        except Exception as e:
+            logger.warning("打开会话失败 (name=%s): %s", name, e)
             return False
 
     def read_last_messages(self, page, n: int = 20) -> list[str]:
@@ -89,6 +96,7 @@ class BrowserController:
         for m in msgs[-n:]:
             try:
                 texts.append(m.inner_text().strip())
-            except Exception:
+            except Exception as e:
+                logger.warning("读取消息文本失败: %s", e)
                 continue
         return texts

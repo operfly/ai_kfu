@@ -54,15 +54,20 @@ copy .env.example .env    # 填入 DEEPSEEK_API_KEY
 
 ### 3. 启动调试 Chrome 并登录
 
-先**完全退出**已打开的 Chrome，再运行：
+先**完全退出**已打开的 Chrome，然后双击根目录的 **`start_chrome.bat`**，或手动运行：
 
 ```bash
-"C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222 --user-data-dir="H:\ai_kfu\data\chrome_profile"
+start_chrome.bat
 ```
 
-在此 Chrome 窗口中登录 `https://mms.pinduoduo.com/` 客服后台。
+脚本会自动检测端口是否被占用：
+- 若调试实例已在运行 → 提示"已在运行"，直接跳到下一步
+- 若未运行 → 启动带调试端口的 Chrome 并自动打开拼多多客服后台
 
+> 脚本等价于手动执行 `"C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222 --user-data-dir="H:\ai_kfu\data\chrome_profile"`。
 > `--user-data-dir` 指向独立配置目录，避免与日常 Chrome 配置冲突。此目录含登录态，已被 .gitignore 排除。
+
+在此 Chrome 窗口中登录 `https://mms.pinduoduo.com/` 客服后台。
 
 ### 4. 验证登录态
 

@@ -1,100 +1,153 @@
 # src/pinduoduo_ai/orchestrator.py
-import time
-from .browser_controller import BrowserController
-from .session_manager import SessionManager
+"""事件驱动主循环：WS 接收消息 → 状态机 → AI 回复 → 敏感词检查 → 发送。"""
+import asyncio
+from pathlib import Path
+
+import aiohttp
+
 from .ai_reply_engine import AIReplyEngine
+from .config import get_api_key, load_config
+from .cookie_store import CookieStore, CookieStoreError
+from .message_types import IncomingMessage
+from .pdd_api import PDDApi, SessionExpiredError
+from .pdd_ws import PDDWebSocket, ReconnectConfig
 from .safety import check_sensitive, default_sensitive_words
-from .config import load_config, get_api_key
+from .session_manager import SessionManager
 
 
 class Orchestrator:
-    def __init__(self, config, browser, session_mgr, ai, sensitive_words=None):
+    """组装 WS 接收与 AI 回复消费，串行处理买家消息。"""
+
+    def __init__(
+        self,
+        config: dict,
+        api: PDDApi,
+        session_mgr: SessionManager,
+        ai: AIReplyEngine,
+        sensitive_words: list[str] | None = None,
+    ):
         self.config = config
-        self.browser = browser
+        self.api = api
         self.sm = session_mgr
         self.ai = ai
         self.sensitive_words = sensitive_words or default_sensitive_words()
-        self.shop_context = config.get("shop_context", "")
+        self.shop_context = self._load_shop_context()
 
-    def run_once(self):
-        """执行一轮扫描，返回动作列表。"""
-        page = self.browser.ensure_service_page()
-        convos = self.browser.get_conversations(page)
-        actions = []
+    def _load_shop_context(self) -> str:
+        path = self.config.get("shop_context", {}).get("file")
+        if not path:
+            return ""
+        try:
+            return Path(path).read_text(encoding="utf-8")
+        except OSError:
+            return ""
+
+    async def handle_message(self, msg: IncomingMessage) -> dict:
+        """处理一条买家消息，返回动作描述。串行调用（由消费端保证）。"""
         p = self.config["polling"]
-        for convo in convos:
-            name = convo["name"]
-            if not convo["has_unread"]:
-                continue
-            if self.sm.should_skip(
-                name,
-                p["conversation_cooldown_seconds"],
-                p["daily_reply_limit"],
-            ):
-                continue
-            if not self.sm.can_send(p["global_rate_limit_seconds"]):
-                continue
-            self.sm.mark_processing(name)
-            if not self.browser.open_conversation(page, name):
-                # 打开会话失败：记录并跳过该会话，不标记状态，下轮重试
-                actions.append({"session": name, "action": "handoff", "text": "打开会话失败，跳过本轮"})
-                continue
-            history = self.browser.read_last_messages(
-                page, self.config["ai"].get("max_history_messages", 20)
-            )
+        uid = msg.uid
+        if self.sm.should_skip(uid, p["conversation_cooldown_seconds"], p["daily_reply_limit"]):
+            return {"uid": uid, "action": "skip", "text": ""}
+        if not self.sm.can_send(p["global_rate_limit_seconds"]):
+            return {"uid": uid, "action": "skip", "text": "rate_limited"}
+
+        self.sm.mark_processing(uid)
+        history = [f"买家: {msg.content}"]
+        try:
             result = self.ai.generate_reply(history, self.shop_context)
+        except Exception:
+            result = {"action": "handoff", "text": "AI 服务暂时不可用"}
 
-            # 安全检查：AI 的回复若含敏感词则转人工
-            if result["action"] == "reply":
-                hit = check_sensitive(result["text"], self.sensitive_words)
-                if hit:
-                    result = {"action": "handoff", "text": f"回复命中敏感词[{hit}]，已转人工"}
-                else:
-                    ok = self.browser.fill_and_send(page, result["text"])
-                    if ok:
-                        self.sm.mark_replied(name)
-                        actions.append({"session": name, "action": "reply", "text": result["text"]})
-                        continue
-                    else:
-                        result = {"action": "handoff", "text": "发送失败，请人工检查"}
+        if result["action"] == "reply":
+            hit = check_sensitive(result["text"], self.sensitive_words)
+            if hit:
+                result = {"action": "handoff", "text": f"回复命中敏感词[{hit}]，已转人工"}
+            else:
+                ok = await self.api.send_text(uid, result["text"])
+                if ok:
+                    self.sm.mark_replied(uid)
+                    return {"uid": uid, "action": "reply", "text": result["text"]}
+                fallback = self.config.get("fallback_text", "亲，感谢您的咨询！客服正在为您处理，请稍等片刻。")
+                await self.api.send_text(uid, fallback)
+                return {"uid": uid, "action": "reply", "text": fallback, "note": "send_failed_fallback"}
 
-            if result["action"] == "handoff":
-                self.sm.mark_handoff(name)
-                # 转人工：不在会话中自动发消息，仅标记状态，留给人工处理
-                actions.append({"session": name, "action": "handoff", "text": result["text"]})
-                continue
+        if result["action"] == "handoff":
+            self.sm.mark_handoff(uid)
+            return {"uid": uid, "action": "handoff", "text": result["text"]}
 
-            # unclear：不发送，也不标记，留给后续轮询再看
-            actions.append({"session": name, "action": "unclear", "text": ""})
-        return actions
-
-    def shutdown(self):
-        self.browser.close()
+        # unclear：不发送，不标记，等后续消息
+        return {"uid": uid, "action": "unclear", "text": ""}
 
 
-def run(config_path: str | None = None):
-    """顶层入口：加载配置 → 连接浏览器 → 主循环。Ctrl+C 停止。"""
+async def _consume_loop(queue: asyncio.Queue, orch: Orchestrator) -> None:
+    while True:
+        msg = await queue.get()
+        try:
+            action = await orch.handle_message(msg)
+            print(f"[{msg.nickname or msg.uid}] {action['action']}: {action.get('text', '')}")
+        except SessionExpiredError as e:
+            print(f"[错误] {e}")
+            raise
+        except Exception as e:
+            print(f"[错误] 处理消息失败: {type(e).__name__}: {e}")
+
+
+async def _run_app(config: dict, cookies: dict, stop_event: asyncio.Event) -> int:
+    async with aiohttp.ClientSession() as http:
+        api = PDDApi(http, cookies, config["pdd"]["http_base"])
+        token = await api.get_token()
+        sm = SessionManager()
+        ai = AIReplyEngine(
+            api_key=get_api_key(),
+            base_url=config["ai"]["base_url"],
+            model=config["ai"]["model"],
+            max_history=config["ai"].get("max_history_messages", 20),
+        )
+        orch = Orchestrator(config, api, sm, ai)
+        queue: asyncio.Queue = asyncio.Queue(maxsize=100)
+
+        r = config.get("reconnect", {})
+        ws = PDDWebSocket(
+            token,
+            queue,
+            api_version=config["pdd"].get("api_version", "202506091557"),
+            base_url=config["pdd"].get("base_ws_url", "wss://m-ws.pinduoduo.com/"),
+            reconnect=ReconnectConfig(
+                max_attempts=r.get("max_attempts", 5),
+                initial_delay=r.get("initial_delay", 2.0),
+                backoff_factor=r.get("backoff_factor", 2.0),
+                max_delay=r.get("max_delay", 60.0),
+            ),
+            on_expired=stop_event.set,
+        )
+
+        ws_task = asyncio.create_task(ws.run())
+        consumer_task = asyncio.create_task(_consume_loop(queue, orch))
+        print("拼多多 AI 客服已启动，Ctrl+C 停止。")
+
+        done, _ = await asyncio.wait(
+            [ws_task, consumer_task, stop_event.wait()],
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for task in (ws_task, consumer_task):
+            task.cancel()
+        await asyncio.gather(ws_task, consumer_task, return_exceptions=True)
+        return 0
+
+
+def run(config_path: str | None = None) -> int:
+    """顶层入口：加载配置 → 加载 Cookie → 启动 WS 主循环。Ctrl+C 停止。"""
     config = load_config(config_path)
-    browser = BrowserController(
-        config["browser"]["cdp_port"], config["browser"]["url"]
-    )
-    browser.connect()
-    sm = SessionManager()
-    ai = AIReplyEngine(
-        api_key=get_api_key(),
-        base_url=config["ai"]["base_url"],
-        model=config["ai"]["model"],
-        max_history=config["ai"].get("max_history_messages", 20),
-    )
-    orch = Orchestrator(config, browser, sm, ai)
-    print("拼多多 AI 客服已启动，Ctrl+C 停止。")
     try:
-        while True:
-            actions = orch.run_once()
-            for a in actions:
-                print(f"[{a['session']}] {a['action']}: {a.get('text','')}")
-            time.sleep(config["polling"]["interval_seconds"])
+        cookies = CookieStore(config["pdd"]["cookie_file"]).load()
+    except CookieStoreError as e:
+        print(f"[错误] {e}")
+        return 1
+
+    stop_event = asyncio.Event()
+    try:
+        return asyncio.run(_run_app(config, cookies, stop_event))
     except KeyboardInterrupt:
         print("\n收到停止信号，正在退出...")
-    finally:
-        orch.shutdown()
+        stop_event.set()
+        return 0

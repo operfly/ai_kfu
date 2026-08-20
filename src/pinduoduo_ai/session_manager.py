@@ -11,6 +11,8 @@ class ConversationState(Enum):
 
 
 class SessionManager:
+    """会话状态机。所有方法的 key 参数为买家 uid（WS 方案下天然以 uid 标识会话）。"""
+
     def __init__(self):
         self._states: dict[str, ConversationState] = {}
         self._last_reply: dict[str, float] = {}

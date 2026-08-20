@@ -12,6 +12,8 @@ dependencies = [
     "pyyaml",
     "python-dotenv",
     "openai",
+    "websockets",
+    "aiohttp",
 ]
 
 [tool.setuptools.packages.find]

@@ -3,11 +3,9 @@
 import asyncio
 from pathlib import Path
 
-import aiohttp
-
 from .ai_reply_engine import AIReplyEngine
 from .config import get_api_key, load_config
-from .cookie_store import CookieStore, CookieStoreError
+from .cookie_store import CDPSession, CookieStoreError
 from .message_types import IncomingMessage
 from .pdd_api import PDDApi, SessionExpiredError
 from .pdd_ws import PDDWebSocket, ReconnectConfig
@@ -79,74 +77,77 @@ class Orchestrator:
         return {"uid": uid, "action": "unclear", "text": ""}
 
 
-async def _consume_loop(queue: asyncio.Queue, orch: Orchestrator) -> None:
-    while True:
+async def _consume_loop(queue: asyncio.Queue, orch: Orchestrator, stop_event: asyncio.Event) -> None:
+    while not stop_event.is_set():
         msg = await queue.get()
         try:
             action = await orch.handle_message(msg)
-            print(f"[{msg.nickname or msg.uid}] {action['action']}: {action.get('text', '')}")
+            print(f"[{msg.nickname or msg.uid}] {action['action']}: {action.get('text', '')}", flush=True)
         except SessionExpiredError as e:
-            print(f"[错误] {e}")
-            raise
+            print(f"[错误] {e}", flush=True)
+            stop_event.set()
         except Exception as e:
-            print(f"[错误] 处理消息失败: {type(e).__name__}: {e}")
+            print(f"[错误] 处理消息失败: {type(e).__name__}: {e}", flush=True)
 
 
-async def _run_app(config: dict, cookies: dict, stop_event: asyncio.Event) -> int:
-    async with aiohttp.ClientSession() as http:
-        api = PDDApi(http, cookies, config["pdd"]["http_base"])
-        token = await api.get_token()
-        sm = SessionManager()
-        ai = AIReplyEngine(
-            api_key=get_api_key(),
-            base_url=config["ai"]["base_url"],
-            model=config["ai"]["model"],
-            max_history=config["ai"].get("max_history_messages", 20),
-        )
-        orch = Orchestrator(config, api, sm, ai)
-        queue: asyncio.Queue = asyncio.Queue(maxsize=100)
+async def _run_app(config: dict, cdp: CDPSession, stop_event: asyncio.Event) -> int:
+    await cdp.connect()
+    page = await cdp.get_page()
+    api = PDDApi(page)
+    token = await api.get_token()
+    sm = SessionManager()
+    ai = AIReplyEngine(
+        api_key=get_api_key(),
+        base_url=config["ai"]["base_url"],
+        model=config["ai"]["model"],
+        max_history=config["ai"].get("max_history_messages", 20),
+    )
+    orch = Orchestrator(config, api, sm, ai)
+    queue: asyncio.Queue = asyncio.Queue(maxsize=100)
 
-        r = config.get("reconnect", {})
-        ws = PDDWebSocket(
-            token,
-            queue,
-            api_version=config["pdd"].get("api_version", "202506091557"),
-            base_url=config["pdd"].get("base_ws_url", "wss://m-ws.pinduoduo.com/"),
-            reconnect=ReconnectConfig(
-                max_attempts=r.get("max_attempts", 5),
-                initial_delay=r.get("initial_delay", 2.0),
-                backoff_factor=r.get("backoff_factor", 2.0),
-                max_delay=r.get("max_delay", 60.0),
-            ),
-            on_expired=stop_event.set,
-        )
+    r = config.get("reconnect", {})
+    ws = PDDWebSocket(
+        token,
+        queue,
+        api_version=config["pdd"].get("api_version", "202506091557"),
+        base_url=config["pdd"].get("base_ws_url", "wss://m-ws.pinduoduo.com/"),
+        reconnect=ReconnectConfig(
+            max_attempts=r.get("max_attempts", 5),
+            initial_delay=r.get("initial_delay", 2.0),
+            backoff_factor=r.get("backoff_factor", 2.0),
+            max_delay=r.get("max_delay", 60.0),
+        ),
+        on_expired=stop_event.set,
+    )
 
-        ws_task = asyncio.create_task(ws.run())
-        consumer_task = asyncio.create_task(_consume_loop(queue, orch))
-        print("拼多多 AI 客服已启动，Ctrl+C 停止。")
+    ws_task = asyncio.create_task(ws.run())
+    consumer_task = asyncio.create_task(_consume_loop(queue, orch, stop_event))
+    stop_task = asyncio.create_task(stop_event.wait())
+    print("拼多多 AI 客服已启动，Ctrl+C 停止。", flush=True)
 
-        done, _ = await asyncio.wait(
-            [ws_task, consumer_task, stop_event.wait()],
+    try:
+        await asyncio.wait(
+            [ws_task, consumer_task, stop_task],
             return_when=asyncio.FIRST_COMPLETED,
         )
-        for task in (ws_task, consumer_task):
+    finally:
+        for task in (ws_task, consumer_task, stop_task):
             task.cancel()
-        await asyncio.gather(ws_task, consumer_task, return_exceptions=True)
-        return 0
+        await asyncio.gather(ws_task, consumer_task, stop_task, return_exceptions=True)
+        await cdp.close()
+    return 0
 
 
 def run(config_path: str | None = None) -> int:
-    """顶层入口：加载配置 → 加载 Cookie → 启动 WS 主循环。Ctrl+C 停止。"""
+    """顶层入口：加载配置 → 连接调试 Chrome → 启动 WS 主循环。Ctrl+C 停止。"""
     config = load_config(config_path)
+    cdp = CDPSession(config.get("pdd", {}).get("cdp_port", 9222))
+    stop_event = asyncio.Event()
     try:
-        cookies = CookieStore(config["pdd"]["cookie_file"]).load()
+        return asyncio.run(_run_app(config, cdp, stop_event))
     except CookieStoreError as e:
         print(f"[错误] {e}")
         return 1
-
-    stop_event = asyncio.Event()
-    try:
-        return asyncio.run(_run_app(config, cookies, stop_event))
     except KeyboardInterrupt:
         print("\n收到停止信号，正在退出...")
         stop_event.set()

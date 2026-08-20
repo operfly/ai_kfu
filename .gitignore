@@ -3,8 +3,6 @@ __pycache__/
 *.pyc
 # Chrome 运行时配置目录（含登录态，不入库）；知识库等其他 data/ 内容正常跟踪
 data/chrome_profile/
-# 拼多多登录态 Cookie（含敏感凭证，不入库）
-data/.pdd_cookies.json
 *.egg-info/
 .pytest_cache/
 .superpowers/

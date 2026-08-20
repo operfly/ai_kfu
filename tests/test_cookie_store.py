@@ -1,97 +1,139 @@
 # tests/test_cookie_store.py
-import json
-
 import pytest
 
-from pinduoduo_ai.cookie_store import CookieStore, CookieStoreError
+from pinduoduo_ai.cookie_store import CDPSession, CookieStoreError
 
 
-def test_save_and_load_roundtrip(tmp_path):
-    path = tmp_path / "cookies.json"
-    store = CookieStore(path)
-    store.save({"PDDAccessToken": "abc", "user_id": "123"})
-    assert store.load() == {"PDDAccessToken": "abc", "user_id": "123"}
+class FakePage:
+    def __init__(self, url="https://mms.pinduoduo.com/home/"):
+        self._url = url
+
+    @property
+    def url(self):
+        return self._url
+
+    async def goto(self, *a, **k):
+        self._url = "https://mms.pinduoduo.com/home/"
+        return None
 
 
-def test_load_missing_file_raises(tmp_path):
-    store = CookieStore(tmp_path / "nope.json")
-    with pytest.raises(CookieStoreError):
-        store.load()
+class FakeContext:
+    def __init__(self, pages=None):
+        self.pages = pages if pages is not None else [FakePage()]
+
+    async def new_page(self):
+        p = FakePage(url="about:blank")
+        self.pages.append(p)
+        return p
 
 
-def test_load_corrupt_json_raises(tmp_path):
-    path = tmp_path / "cookies.json"
-    path.write_text("{broken", encoding="utf-8")
-    store = CookieStore(path)
-    with pytest.raises(CookieStoreError):
-        store.load()
+class FakeBrowser:
+    def __init__(self, context):
+        self.contexts = [context]
 
 
-def test_load_non_dict_raises(tmp_path):
-    path = tmp_path / "cookies.json"
-    path.write_text(json.dumps(["not", "a", "dict"]), encoding="utf-8")
-    store = CookieStore(path)
-    with pytest.raises(CookieStoreError):
-        store.load()
+class FakeChromium:
+    def __init__(self, browser):
+        self._browser = browser
+
+    async def connect_over_cdp(self, url):
+        return self._browser
 
 
-def test_export_from_cdp(monkeypatch, tmp_path):
-    """mock Playwright CDP 导出，验证 Cookie dict 转换与域名过滤。"""
+class FakePlaywright:
+    def __init__(self, browser):
+        self.chromium = FakeChromium(browser)
 
-    class FakeContext:
-        def cookies(self, url):
-            assert url == "https://mms.pinduoduo.com"
-            return [
-                {"name": "PDDAccessToken", "value": "tok", "domain": "mms.pinduoduo.com"},
-                {"name": "other_cookie", "value": "x", "domain": "mms.pinduoduo.com"},
-            ]
-
-    class FakeBrowser:
-        contexts = [FakeContext()]
-
-        def connect_over_cdp(self, url):
-            assert url == "http://localhost:9222"
-            return self
-
-    class FakePlaywright:
-        chromium = FakeBrowser()
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *a):
-            return None
-
-    import pinduoduo_ai.cookie_store as cs
-
-    monkeypatch.setattr(cs, "sync_playwright", lambda: FakePlaywright())
-    cookies = CookieStore.export_from_cdp(cdp_port=9222)
-    assert cookies == {"PDDAccessToken": "tok", "other_cookie": "x"}
+    async def stop(self):
+        return None
 
 
-def test_export_from_cdp_no_cookies_raises(monkeypatch):
-    class FakeContext:
-        def cookies(self, url):
-            return []
+def _fake_async_playwright(browser, playwright=None):
+    """模拟 playwright.async_api.async_playwright()：同步函数返回带 .start() 的对象。
 
-    class FakeBrowser:
-        contexts = [FakeContext()]
+    默认构造 FakePlaywright(browser)；也可传 playwright 自定义对象（如带定制 chromium）。
+    """
 
-        def connect_over_cdp(self, url):
-            assert url == "http://localhost:9222"
-            return self
+    class FakeContextManager:
+        def __init__(self, browser, pw):
+            self._browser = browser
+            self._pw = pw
 
-    class FakePlaywright:
-        chromium = FakeBrowser()
+        async def start(self):
+            return self._pw if self._pw is not None else FakePlaywright(self._browser)
 
-        def __enter__(self):
-            return self
+    return lambda: FakeContextManager(browser, playwright)
 
-        def __exit__(self, *a):
-            return None
+
+@pytest.mark.asyncio
+async def test_connect_uses_cdp_port(monkeypatch):
+    captured = {}
+
+    class FakeChromiumSub(FakeChromium):
+        async def connect_over_cdp(self, url):
+            captured["url"] = url
+            return self._browser
+
+    fake_browser = FakeBrowser(FakeContext())
+    fake_pw = FakePlaywright(fake_browser)
+    fake_pw.chromium = FakeChromiumSub(fake_browser)
 
     import pinduoduo_ai.cookie_store as cs
 
-    monkeypatch.setattr(cs, "sync_playwright", lambda: FakePlaywright())
+    monkeypatch.setattr(cs, "async_playwright", _fake_async_playwright(fake_browser, fake_pw))
+    cdp = CDPSession(cdp_port=9222)
+    await cdp.connect()
+    assert captured["url"] == "http://localhost:9222"
+    await cdp.close()
+
+
+@pytest.mark.asyncio
+async def test_connect_failure_raises(monkeypatch):
+    def fake_start():
+        raise ConnectionRefusedError("down")
+
+    import pinduoduo_ai.cookie_store as cs
+
+    monkeypatch.setattr(cs, "async_playwright", fake_start)
+    cdp = CDPSession(cdp_port=9222)
     with pytest.raises(CookieStoreError):
-        CookieStore.export_from_cdp(cdp_port=9222)
+        await cdp.connect()
+    await cdp.close()
+
+
+@pytest.mark.asyncio
+async def test_get_page_reuses_mms_page(monkeypatch):
+    existing = FakePage(url="https://mms.pinduoduo.com/chat-service/")
+    context = FakeContext(pages=[existing])
+    browser = FakeBrowser(context)
+
+    import pinduoduo_ai.cookie_store as cs
+
+    monkeypatch.setattr(cs, "async_playwright", _fake_async_playwright(browser))
+    cdp = CDPSession()
+    await cdp.connect()
+    page = await cdp.get_page()
+    assert page is existing  # 复用已打开的 mms 页
+    await cdp.close()
+
+
+@pytest.mark.asyncio
+async def test_get_page_creates_when_missing(monkeypatch):
+    context = FakeContext(pages=[])
+    browser = FakeBrowser(context)
+
+    import pinduoduo_ai.cookie_store as cs
+
+    monkeypatch.setattr(cs, "async_playwright", _fake_async_playwright(browser))
+    cdp = CDPSession()
+    await cdp.connect()
+    page = await cdp.get_page()
+    assert page.url == "https://mms.pinduoduo.com/home/"
+    await cdp.close()
+
+
+@pytest.mark.asyncio
+async def test_get_page_before_connect_raises(monkeypatch):
+    cdp = CDPSession()
+    with pytest.raises(CookieStoreError):
+        await cdp.get_page()

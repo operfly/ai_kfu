@@ -3,7 +3,7 @@ pdd:
   api_version: "202506091557"   # 拼多多 WebSocket API 版本（实测确认）
   base_ws_url: "wss://m-ws.pinduoduo.com/"
   http_base: "https://mms.pinduoduo.com"
-  cookie_file: "data/.pdd_cookies.json"   # 登录态 Cookie（scripts/export_cookies.py 导出）
+  cdp_port: 9222   # 本地调试 Chrome 端口（登录态绑定浏览器会话）
 
 polling:
   conversation_cooldown_seconds: 60   # 每会话回复后冷却

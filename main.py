@@ -2,8 +2,9 @@
 
 用法：
   1. 配置 .env（DEEPSEEK_API_KEY）
-  2. 启动调试 Chrome 登录拼多多客服后台，运行 scripts/export_cookies.py 导出 Cookie
-  3. 运行 python main.py
+  2. 用 --remote-debugging-port=9222 --user-data-dir=H:\\ai_kfu\\data\\chrome_profile 启动调试 Chrome
+  3. 在该 Chrome 中登录 https://mms.pinduoduo.com/ 客服后台
+  4. 运行 python main.py
 """
 from pinduoduo_ai.orchestrator import run
 

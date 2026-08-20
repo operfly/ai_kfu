@@ -1,55 +1,58 @@
 # src/pinduoduo_ai/cookie_store.py
-"""拼多多 mms.pinduoduo.com 登录态 Cookie 的保存、加载与 CDP 导出。"""
-import json
-from pathlib import Path
+"""拼多多 CDP 会话管理：连接调试 Chrome 并提供一个已打开 mms 域的页面。
 
-from playwright.sync_api import sync_playwright
+HTTP 接口通过浏览器同源 fetch 调用（鉴权绑定浏览器会话），因此这里不再导出
+cookie 文件，而是直接管理 CDP 连接与页面。
+"""
+from playwright.async_api import async_playwright
+
+PDD_HOME = "https://mms.pinduoduo.com/home/"
 
 
 class CookieStoreError(RuntimeError):
     pass
 
 
-class CookieStore:
-    """管理 mms.pinduoduo.com 的 Cookie dict 与本地文件。"""
+class CDPSession:
+    """管理调试 Chrome 的 CDP 连接，提供 mms 域页面供 fetch 与 WS token 获取。"""
 
-    def __init__(self, path: str | Path):
-        self.path = Path(path)
+    def __init__(self, cdp_port: int = 9222):
+        self.cdp_port = cdp_port
+        self._pw = None
+        self._browser = None
 
-    def save(self, cookies: dict) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(json.dumps(cookies, ensure_ascii=False, indent=2), encoding="utf-8")
-
-    def load(self) -> dict:
-        if not self.path.exists():
-            raise CookieStoreError(
-                f"Cookie 文件不存在: {self.path}。请先运行 python scripts/export_cookies.py"
+    async def connect(self) -> None:
+        try:
+            self._pw = await async_playwright().start()
+            self._browser = await self._pw.chromium.connect_over_cdp(
+                f"http://localhost:{self.cdp_port}"
             )
-        try:
-            data = json.loads(self.path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError as e:
-            raise CookieStoreError(f"Cookie 文件损坏: {self.path} ({e})") from e
-        if not isinstance(data, dict):
-            raise CookieStoreError(f"Cookie 文件格式错误: {self.path}")
-        return data
-
-    @staticmethod
-    def export_from_cdp(cdp_port: int = 9222) -> dict:
-        """通过 Playwright CDP 连接已登录 Chrome，导出 mms.pinduoduo.com 域名的 Cookie。"""
-        try:
-            with sync_playwright() as p:
-                browser = p.chromium.connect_over_cdp(f"http://localhost:{cdp_port}")
-                context = browser.contexts[0]
-                cookies = context.cookies("https://mms.pinduoduo.com")
         except Exception as e:
+            await self.close()
             raise CookieStoreError(
-                f"无法连接调试 Chrome（端口 {cdp_port}）。"
-                f"请确认已用 --remote-debugging-port={cdp_port} --user-data-dir=H:\\ai_kfu\\data\\chrome_profile "
-                f"启动 Chrome 并登录拼多多客服后台。({type(e).__name__})"
+                f"无法连接调试 Chrome（端口 {self.cdp_port}）。"
+                f"请确认已用 --remote-debugging-port={self.cdp_port} "
+                f"--user-data-dir=H:\\ai_kfu\\data\\chrome_profile 启动 Chrome 并登录拼多多客服后台。"
+                f"({type(e).__name__})"
             ) from e
-        if not cookies:
-            raise CookieStoreError(
-                f"未找到 mms.pinduoduo.com 的 Cookie。"
-                f"请确认已用 --remote-debugging-port={cdp_port} 启动 Chrome 并登录拼多多客服后台。"
-            )
-        return {c["name"]: c["value"] for c in cookies}
+
+    async def get_page(self):
+        """返回一个已打开 mms.pinduoduo.com 域的页面；无则新建并导航过去。"""
+        if not self._browser:
+            raise CookieStoreError("尚未连接调试 Chrome，先调用 connect()")
+        context = self._browser.contexts[0]
+        for page in context.pages:
+            if "mms.pinduoduo.com" in page.url:
+                return page
+        page = await context.new_page()
+        await page.goto(PDD_HOME, wait_until="domcontentloaded")
+        return page
+
+    async def close(self) -> None:
+        if self._pw:
+            try:
+                await self._pw.stop()
+            except Exception:
+                pass
+            self._pw = None
+            self._browser = None

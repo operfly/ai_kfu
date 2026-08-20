@@ -1,62 +1,50 @@
 # src/pinduoduo_ai/pdd_api.py
-"""拼多多商家后台 HTTP API 封装（基于登录态 Cookie）。"""
+"""拼多多商家后台 HTTP API 封装。
+
+鉴权绑定浏览器会话（脱离浏览器用 cookie 直连会 43001），因此所有 HTTP 请求
+通过已连接的调试 Chrome 页面执行同源 fetch，天然带浏览器完整鉴权。
+"""
 import time
 from typing import Any
 
-import aiohttp
 
-from .cookie_store import CookieStoreError
-
-
-class SessionExpiredError(CookieStoreError):
-    """登录态失效（error_code=43001），需要重新导出 Cookie。"""
+class SessionExpiredError(RuntimeError):
+    """登录态失效，需要重新登录浏览器会话。"""
 
 
 class PDDApi:
-    """封装 mms.pinduoduo.com 的鉴权与消息接口。
+    """通过 CDP 连接的浏览器页面执行 mms.pinduoduo.com 的 HTTP 接口。
 
-    所有请求带 Cookie；43001（会话过期）抛 SessionExpiredError。
+    page 必须是 Playwright async Page，且已打开 mms.pinduoduo.com 域页面。
     """
 
-    def __init__(self, session: aiohttp.ClientSession, cookies: dict, http_base: str = "https://mms.pinduoduo.com"):
-        self._session = session
-        self.cookies = cookies
-        self.http_base = http_base.rstrip("/")
+    def __init__(self, page):
+        self._page = page
 
-    async def _post(self, url: str, *, json_data: Any = None, data: Any = None, headers: dict | None = None) -> dict | None:
-        merged_headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36",
-            "Content-Type": "application/json",
-            "accept-language": "zh-CN,zh;q=0.9,en;q=0.8",
-        }
-        if headers:
-            merged_headers.update(headers)
-        async with self._session.post(
-            f"{self.http_base}{url}",
-            json=json_data,
-            data=data,
-            cookies=self.cookies,
-            headers=merged_headers,
-            timeout=aiohttp.ClientTimeout(total=30),
-        ) as resp:
-            try:
-                return await resp.json(content_type=None)
-            except Exception:
-                return None
+    async def _post(self, url: str, *, json_data: Any = None, data: Any = None) -> dict | None:
+        script = """(args) => {
+            const {url, json_data, data} = args;
+            const headers = {'Content-Type': 'application/json'};
+            let body;
+            if (data !== undefined && data !== null) body = data;
+            else if (json_data !== undefined && json_data !== null) body = JSON.stringify(json_data);
+            return fetch(url, {method: 'POST', headers, body}).then(r => r.json()).catch(() => null);
+        }"""
+        return await self._page.evaluate(script, {"url": url, "json_data": json_data, "data": data})
 
     @staticmethod
     def _check_session_expired(result: dict | None) -> None:
         if result and result.get("error_code") == 43001 and "会话已过期" in str(result.get("error_msg", "")):
-            raise SessionExpiredError("登录已过期，请重新打开 Chrome 登录后运行 scripts/export_cookies.py")
+            raise SessionExpiredError("登录已过期，请在调试 Chrome 中重新登录拼多多客服后台")
 
     async def get_token(self) -> str:
         result = await self._post("/chats/getToken", json_data={"version": "3"})
         self._check_session_expired(result)
         if not result:
-            raise CookieStoreError("获取 token 失败：无响应")
+            raise RuntimeError("获取 token 失败：无响应")
         token = result.get("token") or (result.get("result") or {}).get("token")
         if not token:
-            raise CookieStoreError("获取 token 失败：响应中无 token 字段")
+            raise RuntimeError("获取 token 失败：响应中无 token 字段")
         return token
 
     async def get_shop_info(self) -> dict:

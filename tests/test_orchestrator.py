@@ -3,10 +3,10 @@ import asyncio
 
 import pytest
 
+from pinduoduo_ai.knowledge import KnowledgeBase
 from pinduoduo_ai.message_types import IncomingMessage, MsgType
 from pinduoduo_ai.orchestrator import Orchestrator
 from pinduoduo_ai.session_manager import SessionManager
-
 
 CONFIG = {
     "polling": {
@@ -17,6 +17,13 @@ CONFIG = {
     "shop_context": {"file": ""},
     "fallback_text": "亲，客服正在为您处理，请稍等片刻。",
 }
+
+KB_MD = """# 测试话术库
+## 发货
+- 问发货时间：亲，我们承诺 48 小时内发货的哦～
+## 物流
+- 问物流进度：亲，您可以在【我的订单】里查看物流单号
+"""
 
 
 class FakeAI:
@@ -47,68 +54,100 @@ def run(coro):
     return asyncio.run(coro)
 
 
-def _make(ai_result, send_ok=True, sensitive=None):
+def _make(ai_result, send_ok=True, sensitive=None, kb=None):
     ai = FakeAI(ai_result)
     api = FakeApi(send_ok=send_ok)
     sm = SessionManager()
-    orch = Orchestrator(CONFIG, api, sm, ai, sensitive_words=sensitive)
+    orch = Orchestrator(CONFIG, api, sm, ai, sensitive_words=sensitive, knowledge=kb)
     return orch, api, sm, ai
 
 
-def test_reply_flow_sends_message():
-    orch, api, sm, ai = _make({"action": "reply", "text": "亲，您好！请问有什么可以帮您？"})
-    action = run(orch.handle_message(_msg()))
-    assert api.sent == [("buyer-1", "亲，您好！请问有什么可以帮您？")]
+def _make_kb(tmp_path=None):
+    import tempfile
+    from pathlib import Path
+
+    if tmp_path:
+        p = tmp_path / "kb.md"
+    else:
+        tmp = tempfile.mkdtemp()
+        p = Path(tmp) / "kb.md"
+    p.write_text(KB_MD, encoding="utf-8")
+    return KnowledgeBase(p)
+
+
+def test_reply_flow_sends_message(tmp_path):
+    kb = _make_kb(tmp_path)
+    orch, api, sm, ai = _make({"action": "reply", "text": "亲，我们承诺 48 小时内发货"}, kb=kb)
+    action = run(orch.handle_message(_msg(content="什么时候发货")))
+    assert api.sent == [("buyer-1", "亲，我们承诺 48 小时内发货")]
     assert action["action"] == "reply"
     assert sm.get_state("buyer-1").value == "replied"
+    # 检索到的话术注入 AI
+    assert "48 小时内发货" in ai.calls[0][1]
 
 
-def test_sensitive_triggers_handoff_no_send():
-    orch, api, sm, ai = _make({"action": "reply", "text": "可以退款的亲"})
-    action = run(orch.handle_message(_msg()))
+def test_sensitive_triggers_handoff_no_send(tmp_path):
+    kb = _make_kb(tmp_path)
+    orch, api, sm, ai = _make({"action": "reply", "text": "可以退款的亲"}, kb=kb)
+    action = run(orch.handle_message(_msg(content="发货了吗")))
     assert api.sent == []  # 含"退款"被拦截
     assert action["action"] == "handoff"
     assert sm.get_state("buyer-1").value == "handoff"
 
 
-def test_handoff_action_no_send():
-    orch, api, sm, ai = _make({"action": "handoff", "text": "涉及退款"})
-    action = run(orch.handle_message(_msg()))
+def test_handoff_action_no_send(tmp_path):
+    kb = _make_kb(tmp_path)
+    orch, api, sm, ai = _make({"action": "handoff", "text": "涉及退款"}, kb=kb)
+    action = run(orch.handle_message(_msg(content="发货了吗")))
     assert api.sent == []
     assert action["action"] == "handoff"
     assert sm.get_state("buyer-1").value == "handoff"
 
 
-def test_unclear_no_send_no_state():
-    orch, api, sm, ai = _make({"action": "unclear", "text": ""})
-    action = run(orch.handle_message(_msg()))
+def test_unclear_no_send_no_state(tmp_path):
+    kb = _make_kb(tmp_path)
+    orch, api, sm, ai = _make({"action": "unclear", "text": ""}, kb=kb)
+    action = run(orch.handle_message(_msg(content="发货了吗")))
     assert api.sent == []
     assert action["action"] == "unclear"
-    # unclear 不标记 replied/handoff，但已进入 processing
     assert sm.get_state("buyer-1").value == "processing"
 
 
-def test_cooldown_skips_reply():
-    orch, api, sm, ai = _make({"action": "reply", "text": "x"})
-    run(orch.handle_message(_msg(uid="a")))  # 先回复一次
-    action = run(orch.handle_message(_msg(uid="a")))  # 冷却期内
+def test_no_knowledge_hit_handoff_no_ai_call(tmp_path):
+    """买家问题未命中任何话题 → 直接转人工，不调用 AI。"""
+    kb = _make_kb(tmp_path)
+    orch, api, sm, ai = _make({"action": "reply", "text": "x"}, kb=kb)
+    action = run(orch.handle_message(_msg(content="今天天气怎么样")))
+    assert api.sent == []
+    assert ai.calls == []  # 未调用 AI
+    assert action["action"] == "handoff"
+    assert sm.get_state("buyer-1").value == "handoff"
+
+
+def test_no_knowledge_base_all_handoff(tmp_path):
+    """未配置知识库 → 所有消息直接转人工。"""
+    orch, api, sm, ai = _make({"action": "reply", "text": "x"})  # kb=None
+    action = run(orch.handle_message(_msg(content="什么时候发货")))
+    assert api.sent == []
+    assert ai.calls == []
+    assert action["action"] == "handoff"
+
+
+def test_cooldown_skips_reply(tmp_path):
+    kb = _make_kb(tmp_path)
+    orch, api, sm, ai = _make({"action": "reply", "text": "x"}, kb=kb)
+    run(orch.handle_message(_msg(uid="a", content="发货了吗")))  # 先回复一次
+    action = run(orch.handle_message(_msg(uid="a", content="发货了吗")))  # 冷却期内
     assert action["action"] == "skip"
     assert len(api.sent) == 1
 
 
-def test_send_failure_uses_fallback():
-    orch, api, sm, ai = _make({"action": "reply", "text": "正常回复"}, send_ok=False)
-    action = run(orch.handle_message(_msg()))
-    # 先试发原回复失败，再补发兜底话术
+def test_send_failure_uses_fallback(tmp_path):
+    kb = _make_kb(tmp_path)
+    orch, api, sm, ai = _make({"action": "reply", "text": "正常回复"}, send_ok=False, kb=kb)
+    action = run(orch.handle_message(_msg(content="发货了吗")))
     assert api.sent == [
         ("buyer-1", "正常回复"),
         ("buyer-1", "亲，客服正在为您处理，请稍等片刻。"),
     ]
     assert action["note"] == "send_failed_fallback"
-
-
-def test_shop_context_loaded_and_passed():
-    orch, api, sm, ai = _make({"action": "unclear", "text": ""})
-    # 无 shop_context 文件时传入空串
-    run(orch.handle_message(_msg()))
-    assert ai.calls[0][1] == ""

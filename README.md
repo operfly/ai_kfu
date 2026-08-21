@@ -32,6 +32,7 @@
 
 - **实时消息接收**：拼多多商家后台 WebSocket 推送，无需轮询
 - **AI 智能回复**：DeepSeek 生成客服话术（OpenAI 兼容接口）
+- **知识库检索**：按买家问题检索话术库相关话题注入 AI；无命中自动转人工
 - **敏感词自动转人工**：退款/投诉/法律等话题不自动回复，标记转人工
 - **发送失败兜底**：AI 回复发送失败时自动补发兜底话术
 - **会话状态机**：每会话冷却、全局发送节流、每日回复限额
@@ -96,7 +97,7 @@ python main.py
 | `polling.daily_reply_limit` | 每日自动回复上限 |
 | `reconnect.*` | WebSocket 断线重连参数（退避） |
 | `ai.model` / `ai.base_url` | DeepSeek 模型与接口地址 |
-| `shop_context.file` | 客服话术库文件（作为 AI 店铺上下文） |
+| `shop_context.file` | 客服话术库文件（按买家问题检索相关话题注入 AI） |
 | `fallback_text` | 发送失败时的兜底话术 |
 | `business_hours` | 营业时间（预留） |
 
@@ -111,7 +112,7 @@ python main.py
 
 ## 话术库
 
-`data/knowledge_base.md` 为通用客服话术库，作为 `shop_context` 注入 AI 提示词，可编辑扩充以提升回复准确性。
+`data/knowledge_base.md` 为通用客服话术库，按话题分组。程序根据买家问题检索相关话题话术注入 AI（无命中则转人工），可编辑扩充以提升回复准确性。新增话题时保持 `## 话题名` + `- 话术` 格式。
 
 ## 测试
 

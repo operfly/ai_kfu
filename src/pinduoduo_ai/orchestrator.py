@@ -6,6 +6,7 @@ from pathlib import Path
 from .ai_reply_engine import AIReplyEngine
 from .config import get_api_key, load_config
 from .cookie_store import CDPSession, CookieStoreError
+from .knowledge import KnowledgeBase
 from .message_types import IncomingMessage
 from .pdd_api import PDDApi, SessionExpiredError
 from .pdd_ws import PDDWebSocket, ReconnectConfig
@@ -23,22 +24,23 @@ class Orchestrator:
         session_mgr: SessionManager,
         ai: AIReplyEngine,
         sensitive_words: list[str] | None = None,
+        knowledge: KnowledgeBase | None = None,
     ):
         self.config = config
         self.api = api
         self.sm = session_mgr
         self.ai = ai
         self.sensitive_words = sensitive_words or default_sensitive_words()
-        self.shop_context = self._load_shop_context()
+        self.kb = knowledge or self._load_knowledge()
 
-    def _load_shop_context(self) -> str:
+    def _load_knowledge(self) -> KnowledgeBase | None:
         path = self.config.get("shop_context", {}).get("file")
         if not path:
-            return ""
+            return None
         try:
-            return Path(path).read_text(encoding="utf-8")
-        except OSError:
-            return ""
+            return KnowledgeBase(path)
+        except (OSError, FileNotFoundError):
+            return None
 
     async def handle_message(self, msg: IncomingMessage) -> dict:
         """处理一条买家消息，返回动作描述。串行调用（由消费端保证）。"""
@@ -51,8 +53,16 @@ class Orchestrator:
 
         self.sm.mark_processing(uid)
         history = [f"买家: {msg.content}"]
+
+        # 知识库检索：无命中则转人工，不调用 AI
+        related = self.kb.retrieve(msg.content) if self.kb else []
+        if not related:
+            self.sm.mark_handoff(uid)
+            return {"uid": uid, "action": "handoff", "text": "未找到相关知识，转人工"}
+
+        shop_context = "\n".join(related)
         try:
-            result = self.ai.generate_reply(history, self.shop_context)
+            result = self.ai.generate_reply(history, shop_context)
         except Exception:
             result = {"action": "handoff", "text": "AI 服务暂时不可用"}
 

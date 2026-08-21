@@ -108,3 +108,41 @@ def test_post_uses_relative_url():
 
     api = _make_api(FakePage([handler]))
     run(api.get_token())
+
+
+# ===== 真实转人工 API =====
+
+def test_get_assign_cs_list_success():
+    cs_list = [{"uid": "cs_111_222", "username": "客服A"}, {"uid": "cs_333_444", "username": "客服B"}]
+    api = _make_api(FakePage([{"success": True, "result": {"csList": cs_list}}]))
+    result = run(api.get_assign_cs_list())
+    assert result == cs_list
+
+
+def test_get_assign_cs_list_failure_returns_none():
+    api = _make_api(FakePage([{"success": False}]))
+    assert run(api.get_assign_cs_list()) is None
+
+
+def test_move_conversation_payload_and_success():
+    def handler(arg):
+        payload = arg["json_data"]
+        assert payload["client"] == "WEB"
+        assert payload["data"]["cmd"] == "move_conversation"
+        conv = payload["data"]["conversation"]
+        assert conv["csid"] == "cs_111_222"
+        assert conv["uid"] == "buyer-1"
+        return {"success": True}
+
+    api = _make_api(FakePage([handler]))
+    assert run(api.move_conversation("buyer-1", "cs_111_222")) is True
+
+
+def test_move_conversation_failure_returns_false():
+    api = _make_api(FakePage([{"success": False}]))
+    assert run(api.move_conversation("buyer-1", "cs_111_222")) is False
+
+
+def test_move_conversation_no_response_returns_false():
+    api = _make_api(FakePage([None]))
+    assert run(api.move_conversation("buyer-1", "cs_111_222")) is False

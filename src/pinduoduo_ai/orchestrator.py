@@ -57,8 +57,7 @@ class Orchestrator:
         # 知识库检索：无命中则转人工，不调用 AI
         related = self.kb.retrieve(msg.content) if self.kb else []
         if not related:
-            self.sm.mark_handoff(uid)
-            return {"uid": uid, "action": "handoff", "text": "未找到相关知识，转人工"}
+            return await self._transfer_to_cs(uid, "未找到相关知识，转人工")
 
         shop_context = "\n".join(related)
         try:
@@ -69,7 +68,7 @@ class Orchestrator:
         if result["action"] == "reply":
             hit = check_sensitive(result["text"], self.sensitive_words)
             if hit:
-                result = {"action": "handoff", "text": f"回复命中敏感词[{hit}]，已转人工"}
+                return await self._transfer_to_cs(uid, f"回复命中敏感词[{hit}]，已转人工")
             else:
                 ok = await self.api.send_text(uid, result["text"])
                 if ok:
@@ -80,11 +79,25 @@ class Orchestrator:
                 return {"uid": uid, "action": "reply", "text": fallback, "note": "send_failed_fallback"}
 
         if result["action"] == "handoff":
-            self.sm.mark_handoff(uid)
-            return {"uid": uid, "action": "handoff", "text": result["text"]}
+            return await self._transfer_to_cs(uid, result["text"])
 
         # unclear：不发送，不标记，等后续消息
         return {"uid": uid, "action": "unclear", "text": ""}
+
+    async def _transfer_to_cs(self, uid: str, reason: str) -> dict:
+        """真实转人工：获取可用客服并转移会话。返回动作描述。"""
+        self.sm.mark_handoff(uid)
+        cs_list = await self.api.get_assign_cs_list()
+        if not cs_list:
+            hint = "抱歉，当前没有其他客服在线，请您稍后再试。"
+            await self.api.send_text(uid, hint)
+            return {"uid": uid, "action": "handoff", "text": reason, "note": "no_cs_available"}
+        # 取第一个可用客服（参考仓库同样取第一个）
+        cs_uid = cs_list[0].get("uid")
+        ok = await self.api.move_conversation(uid, cs_uid)
+        if ok:
+            return {"uid": uid, "action": "handoff", "text": reason, "note": "transferred"}
+        return {"uid": uid, "action": "handoff", "text": reason, "note": "transfer_failed"}
 
 
 async def _consume_loop(queue: asyncio.Queue, orch: Orchestrator, stop_event: asyncio.Event) -> None:

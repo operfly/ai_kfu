@@ -87,3 +87,32 @@ class PDDApi:
                 return False
             return True
         return False
+
+    async def get_assign_cs_list(self) -> list[dict] | None:
+        """获取可分配的客服列表。失败返回 None。"""
+        result = await self._post("/latitude/assign/getAssignCsList", json_data={"wechatCheck": True})
+        self._check_session_expired(result)
+        if result and result.get("success"):
+            return (result.get("result") or {}).get("csList")
+        return None
+
+    async def move_conversation(self, recipient_uid: str, cs_uid: str) -> bool:
+        """将会话转给指定客服。成功返回 True。"""
+        payload = {
+            "data": {
+                "cmd": "move_conversation",
+                "request_id": int(time.time() * 1000),
+                "conversation": {
+                    "csid": cs_uid,
+                    "uid": recipient_uid,
+                    "need_wx": False,
+                    "remark": "无原因直接转移",
+                },
+            },
+            "client": "WEB",
+        }
+        result = await self._post("/plateau/chat/move_conversation", json_data=payload)
+        self._check_session_expired(result)
+        if result and result.get("success") is True:
+            return True
+        return False
